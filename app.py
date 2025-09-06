@@ -12,32 +12,48 @@ import gdown
 # ----------------- Download CNN model and encoder if not present -----------------
 if not os.path.exists("emotion_model.h5"):
     st.info("Downloading CNN model...")
-    url_model = "https://drive.google.com/file/d/1gPfPbTG89asZEO3CEV4A05UxM6dlgU_Q/view?usp=sharing"  # Google Drive or raw GitHub URL
+    # Convert Google Drive share link to direct download link
+    url_model = "https://drive.google.com/uc?id=1gPfPbTG89asZEO3CEV4A05UxM6dlgU_Q"
     gdown.download(url_model, "emotion_model.h5", quiet=False)
 
 if not os.path.exists("label_encoder.pkl"):
     st.info("Downloading label encoder...")
-    url_encoder = "https://drive.google.com/file/d/1A54IqCWlcNq0J_KJ5nI1wXktKoOrKgNE/view?usp=drive_link"
+    # Convert Google Drive share link to direct download link
+    url_encoder = "https://drive.google.com/uc?id=1A54IqCWlcNq0J_KJ5nI1wXktKoOrKgNE"
     gdown.download(url_encoder, "label_encoder.pkl", quiet=False)
 
-# ----------------- Load Models -----------------
-# CNN model
-cnn_model = load_model("emotion_model.h5")
-with open("label_encoder.pkl", "rb") as f:
-    le = pickle.load(f)
+# ----------------- Load Models with Error Handling -----------------
+try:
+    # CNN model
+    cnn_model = load_model("emotion_model.h5")
+    with open("label_encoder.pkl", "rb") as f:
+        le = pickle.load(f)
+    st.success("✅ CNN model and encoder loaded successfully!")
+except Exception as e:
+    st.error(f"❌ Error loading CNN model or encoder: {e}")
+    st.info("Please make sure the model files are available or check the download links.")
+    # Set to None to prevent further errors
+    cnn_model = None
+    le = None
 
-# BEiT model
-processor = BeitImageProcessor.from_pretrained(
-    "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large"
-)
-beit_model = BeitForImageClassification.from_pretrained(
-    "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large",
-    torch_dtype=torch.float32,
-    device_map=None
-)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-beit_model.to(device)
+# BEiT model (this should work as it downloads from HuggingFace)
+try:
+    processor = BeitImageProcessor.from_pretrained(
+        "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large"
+    )
+    beit_model = BeitForImageClassification.from_pretrained(
+        "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large",
+        torch_dtype=torch.float32,
+        device_map=None
+    )
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    beit_model.to(device)
+    st.success("✅ BEiT model loaded successfully!")
+except Exception as e:
+    st.error(f"❌ Error loading BEiT model: {e}")
+    beit_model = None
+    processor = None
 
 # ----------------- Emoji + Name Mapping -----------------
 emotion_map = {
@@ -74,64 +90,72 @@ if uploaded_file is not None:
     st.image(image, caption="Uploaded Image", use_column_width=True)
 
     # ----------------- CNN Prediction -----------------
-    if model_choice == "CNN (My Model)":
-        image_gray = image.convert("L")
-        img_array = np.array(image_gray.resize((48, 48)))
-        img_array = img_array.reshape(1, 48, 48, 1) / 255.0
+    if model_choice == "CNN (My Model)" and cnn_model is not None and le is not None:
+        try:
+            image_gray = image.convert("L")
+            img_array = np.array(image_gray.resize((48, 48)))
+            img_array = img_array.reshape(1, 48, 48, 1) / 255.0
 
-        pred = cnn_model.predict(img_array)
-        probs = pred[0]
-        pred_idx = probs.argmax()
-        label_name = le.inverse_transform([pred_idx])[0]
-        predicted_label = emotion_map.get(label_name, label_name)
-        confidence = probs[pred_idx] * 100
+            pred = cnn_model.predict(img_array)
+            probs = pred[0]
+            pred_idx = probs.argmax()
+            label_name = le.inverse_transform([pred_idx])[0]
+            predicted_label = emotion_map.get(label_name, label_name)
+            confidence = probs[pred_idx] * 100
 
-        st.success(f"✅ Predicted Emotion (CNN): {predicted_label}")
-        st.info(f"📊 Confidence: {confidence:.2f}%")
+            st.success(f"✅ Predicted Emotion (CNN): {predicted_label}")
+            st.info(f"📊 Confidence: {confidence:.2f}%")
 
-        top3_idx = probs.argsort()[-3:][::-1]
-        st.write("💡 Top 3 Predictions (CNN):")
-        for i in top3_idx:
-            name = emotion_map.get(le.inverse_transform([i])[0], le.inverse_transform([i])[0])
-            st.write(f"{name}: {probs[i]*100:.2f}%")
+            top3_idx = probs.argsort()[-3:][::-1]
+            st.write("💡 Top 3 Predictions (CNN):")
+            for i in top3_idx:
+                name = emotion_map.get(le.inverse_transform([i])[0], le.inverse_transform([i])[0])
+                st.write(f"{name}: {probs[i]*100:.2f}%")
 
-        fig, ax = plt.subplots(figsize=(7, 4))
-        emotion_names = [emotion_map.get(name, name) for name in le.classes_]
-        ax.bar(emotion_names, probs, color="#4CAF50", alpha=0.8)
-        ax.set_ylabel("Probability")
-        ax.set_xlabel("Emotions")
-        ax.set_title("Emotion Probability Distribution (CNN)")
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
-
+            fig, ax = plt.subplots(figsize=(7, 4))
+            emotion_names = [emotion_map.get(name, name) for name in le.classes_]
+            ax.bar(emotion_names, probs, color="#4CAF50", alpha=0.8)
+            ax.set_ylabel("Probability")
+            ax.set_xlabel("Emotions")
+            ax.set_title("Emotion Probability Distribution (CNN)")
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"❌ Error during CNN prediction: {e}")
+    
     # ----------------- BEiT Prediction -----------------
+    elif model_choice == "BEiT (Pretrained Transformer)" and beit_model is not None and processor is not None:
+        try:
+            inputs = processor(images=image.convert("RGB"), return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                outputs = beit_model(**inputs)
+
+            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
+            pred_idx = probs.argmax().item()
+            label_name = beit_model.config.id2label[pred_idx]
+            predicted_label = beit_label_map.get(label_name, label_name)
+            confidence = probs[pred_idx].item() * 100
+
+            st.success(f"✅ Predicted Emotion (BEiT): {predicted_label}")
+            st.info(f"📊 Confidence: {confidence:.2f}%")
+
+            top3_idx = probs.topk(3).indices
+            st.write("💡 Top 3 Predictions (BEiT):")
+            for i in top3_idx:
+                name = beit_label_map.get(beit_model.config.id2label[i.item()], beit_model.config.id2label[i.item()])
+                st.write(f"{name}: {probs[i].item()*100:.2f}%")
+
+            fig, ax = plt.subplots(figsize=(7, 4))
+            emotion_names = [beit_label_map.get(beit_model.config.id2label[i], beit_model.config.id2label[i]) for i in range(len(probs))]
+            ax.bar(emotion_names, probs.cpu().numpy(), color="#4CAF50", alpha=0.8)
+            ax.set_ylabel("Probability")
+            ax.set_xlabel("Emotions")
+            ax.set_title("Emotion Probability Distribution (BEiT)")
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"❌ Error during BEiT prediction: {e}")
     else:
-        inputs = processor(images=image.convert("RGB"), return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = beit_model(**inputs)
-
-        probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
-        pred_idx = probs.argmax().item()
-        label_name = beit_model.config.id2label[pred_idx]
-        predicted_label = beit_label_map.get(label_name, label_name)
-        confidence = probs[pred_idx].item() * 100
-
-        st.success(f"✅ Predicted Emotion (BEiT): {predicted_label}")
-        st.info(f"📊 Confidence: {confidence:.2f}%")
-
-        top3_idx = probs.topk(3).indices
-        st.write("💡 Top 3 Predictions (BEiT):")
-        for i in top3_idx:
-            name = beit_label_map.get(beit_model.config.id2label[i.item()], beit_model.config.id2label[i.item()])
-            st.write(f"{name}: {probs[i].item()*100:.2f}%")
-
-        fig, ax = plt.subplots(figsize=(7, 4))
-        emotion_names = [beit_label_map.get(beit_model.config.id2label[i], beit_model.config.id2label[i]) for i in range(len(probs))]
-        ax.bar(emotion_names, probs.cpu().numpy(), color="#4CAF50", alpha=0.8)
-        ax.set_ylabel("Probability")
-        ax.set_xlabel("Emotions")
-        ax.set_title("Emotion Probability Distribution (BEiT)")
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
+        st.error("❌ Selected model is not available. Please check if models downloaded correctly.")
