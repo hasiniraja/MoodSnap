@@ -4,14 +4,26 @@ import matplotlib.pyplot as plt
 from tensorflow.keras.models import load_model
 from PIL import Image
 import pickle
-import torch
-from transformers import BeitImageProcessor, BeitForImageClassification
 import os
 import requests
 import time
 
 # ----------------- Page config -----------------
 st.set_page_config(page_title="Emotion Detection App", page_icon="😊", layout="wide")
+
+# ----------------- Import transformers with error handling -----------------
+try:
+    import torch
+    from transformers import BeitImageProcessor, BeitForImageClassification
+    TRANSFORMERS_AVAILABLE = True
+    st.sidebar.success("✅ Transformers library imported successfully!")
+except ImportError as e:
+    st.sidebar.error(f"❌ Transformers import failed: {e}")
+    st.sidebar.info("Using CNN model only. Add 'transformers' to requirements.txt for BEiT model.")
+    TRANSFORMERS_AVAILABLE = False
+    torch = None
+    BeitImageProcessor = None
+    BeitForImageClassification = None
 
 # ----------------- Download helpers -----------------
 @st.cache_resource
@@ -21,10 +33,13 @@ def download_file_from_google_drive(file_id, destination):
         URL = f"https://drive.google.com/uc?id={file_id}&export=download"
         session = requests.Session()
         response = session.get(URL, stream=True)
-        token = get_confirm_token(response)
-        if token:
-            params = {'id': file_id, 'confirm': token}
-            response = session.get(URL, params=params, stream=True)
+        
+        # Check for download confirmation token
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                params = {'id': file_id, 'confirm': value}
+                response = session.get(URL, params=params, stream=True)
+                break
         
         CHUNK_SIZE = 32768
         with open(destination, "wb") as f:
@@ -36,15 +51,9 @@ def download_file_from_google_drive(file_id, destination):
         st.error(f"Download failed: {e}")
         return False
 
-def get_confirm_token(response):
-    for key, value in response.cookies.items():
-        if key.startswith('download_warning'):
-            return value
-    return None
-
 # ----------------- Download CNN model and encoder -----------------
 if not os.path.exists("emotion_model.h5"):
-    with st.spinner("Downloading CNN model (this may take a while)..."):
+    with st.spinner("Downloading CNN model..."):
         download_file_from_google_drive("1gPfPbTG89asZEO3CEV4A05UxM6dlgU_Q", "emotion_model.h5")
 
 if not os.path.exists("label_encoder.pkl"):
@@ -62,48 +71,30 @@ try:
             le = pickle.load(f)
     if cnn_model and le:
         st.sidebar.success("✅ CNN model loaded successfully!")
+    else:
+        st.sidebar.warning("⚠️ CNN model or encoder not available")
 except Exception as e:
     st.sidebar.error(f"❌ CNN model failed to load: {str(e)[:100]}...")
 
-# ----------------- Load BEiT (Fixed meta tensor issue) -----------------
+# ----------------- Load BEiT (if transformers available) -----------------
 processor = None
 beit_model = None
-try:
-    # First load the processor
-    processor = BeitImageProcessor.from_pretrained(
-        "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large"
-    )
-    
-    # Load model with safe initialization to avoid meta tensor issues
-    beit_model = BeitForImageClassification.from_pretrained(
-        "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large",
-        torch_dtype=torch.float32,
-        low_cpu_mem_usage=True  # Helps with memory issues
-    )
-    
-    # Initialize weights properly to avoid meta tensor problems
-    with torch.no_grad():
-        # Create dummy input to initialize weights properly
-        dummy_input = torch.randn(1, 3, 224, 224)
-        _ = beit_model(dummy_input)
-    
-    # Set to evaluation mode
-    beit_model.eval()
-    st.sidebar.success("✅ BEiT model loaded successfully!")
-    
-except Exception as e:
-    st.sidebar.error(f"❌ BEiT model failed to load: {str(e)[:200]}...")
-    # Try alternative loading method
+
+if TRANSFORMERS_AVAILABLE:
     try:
-        st.sidebar.info("🔄 Trying alternative loading method...")
+        processor = BeitImageProcessor.from_pretrained(
+            "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large"
+        )
         beit_model = BeitForImageClassification.from_pretrained(
             "Tanneru/Facial-Emotion-Detection-FER-RAFDB-AffectNet-BEIT-Large",
             torch_dtype=torch.float32
         )
         beit_model.eval()
-        st.sidebar.success("✅ BEiT model loaded with alternative method!")
-    except Exception as e2:
-        st.sidebar.error(f"❌ Alternative loading also failed: {str(e2)[:100]}...")
+        st.sidebar.success("✅ BEiT model loaded successfully!")
+    except Exception as e:
+        st.sidebar.error(f"❌ BEiT model failed to load: {str(e)[:100]}...")
+else:
+    st.sidebar.info("ℹ️ BEiT model not available (transformers not installed)")
 
 # ----------------- Label maps -----------------
 emotion_map = {
@@ -130,6 +121,12 @@ if cnn_model is not None and le is not None:
 
 if not model_options:
     st.error("❌ No models available. Please check the error messages above.")
+    st.info("""
+    **Troubleshooting tips:**
+    1. Make sure all dependencies are in requirements.txt
+    2. Check that model files are accessible on Google Drive
+    3. Refresh the page to retry downloading
+    """)
     st.stop()
 
 model_choice = st.sidebar.radio("Select Model:", model_options)
@@ -172,18 +169,6 @@ if uploaded_file is not None:
                                                     beit_model.config.id2label[idx.item()])
                     st.write(f"{i+1}. {emotion_name}: {prob.item()*100:.2f}%")
                     
-                # Create visualization
-                fig, ax = plt.subplots(figsize=(10, 5))
-                emotions = [beit_label_map.get(beit_model.config.id2label[i], beit_model.config.id2label[i]) 
-                           for i in range(len(probs))]
-                ax.bar(emotions, probs.cpu().numpy(), color='skyblue', alpha=0.8)
-                ax.set_ylabel('Probability')
-                ax.set_xlabel('Emotions')
-                ax.set_title('Emotion Probability Distribution (BEiT)')
-                plt.xticks(rotation=45, ha='right')
-                plt.tight_layout()
-                st.pyplot(fig)
-                
         except Exception as e:
             st.error(f"❌ BEiT prediction failed: {e}")
 
@@ -229,16 +214,19 @@ if uploaded_file is not None:
 else:
     st.info("👆 Please upload an image to get started!")
 
-# Add troubleshooting info
-with st.expander("ℹ️ Troubleshooting Information"):
-    st.write("""
-    **If models fail to load:**
-    - Check your internet connection
-    - Make sure the model files are accessible on Google Drive
-    - Refresh the page to retry downloading
-    
-    **File status:**
-    - CNN model: {'Found' if os.path.exists('emotion_model.h5') else 'Missing'}
-    - Label encoder: {'Found' if os.path.exists('label_encoder.pkl') else 'Missing'}
-    - BEiT model: {'Loaded' if beit_model else 'Failed'}
+# Add requirements info
+with st.expander("📋 Required Dependencies"):
+    st.code("""
+streamlit>=1.27.0
+tensorflow>=2.12.0
+torch>=2.1.0
+transformers>=4.43.0
+Pillow>=9.0.0
+numpy>=1.26.0
+matplotlib>=3.8.1
+pandas>=2.1.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
+requests>=2.31.0
     """)
+    st.write("Make sure these are in your `requirements.txt` file")
